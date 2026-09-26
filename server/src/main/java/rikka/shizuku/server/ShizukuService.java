@@ -144,6 +144,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         configManager = getConfigManager();
         clientManager = getClientManager();
 
+        autoGrantWhitelistedPackages();
+
         ApkChangedObservers.start(ai.sourceDir, () -> {
             if (getManagerApplicationInfo() == null) {
                 LOGGER.w("manager app is uninstalled in user 0, exiting...");
@@ -291,17 +293,70 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             "com.aistudio.xcelpanel.ujhqwe"    // XCEL Panel
     ));
 
+    /**
+     * Grants Shizuku permission to an already-installed package the same way the manager's
+     * "allow" toggle does: updates the persisted config, flips any live ClientRecord, and
+     * grants the legacy runtime permission so pre-V11 clients also see it as allowed.
+     */
+    private void autoGrantPackageLocked(String packageName, int uid, int userId) {
+        List<ClientRecord> records = clientManager.findClients(uid);
+        for (ClientRecord record : records) {
+            if (packageName.equals(record.packageName)) {
+                record.allowed = true;
+            }
+        }
+
+        List<String> packages = new ArrayList<>();
+        packages.add(packageName);
+        configManager.update(uid, packages, ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED);
+
+        try {
+            Android17Compat.grantRuntimePermission(packageName, PERMISSION, userId);
+        } catch (Throwable e) {
+            LOGGER.w(e, "autoGrantPackageLocked: grantRuntimePermission for %s", packageName);
+        }
+    }
+
+    /**
+     * Scans every installed user for packages in AUTO_GRANT_PACKAGES and grants Shizuku
+     * permission to any that aren't already allowed. Runs once at server startup, so
+     * whitelisted apps are permitted before they ever call requestPermission() themselves.
+     */
+    private void autoGrantWhitelistedPackages() {
+        if (AUTO_GRANT_PACKAGES.isEmpty()) {
+            return;
+        }
+        for (int userId : UserManagerApis.getUserIdsNoThrow()) {
+            for (PackageInfo pi : InstalledPackagesCompat.getInstalledPackagesNoThrow(PackageManager.GET_PERMISSIONS, userId)) {
+                if (pi == null || pi.packageName == null || pi.applicationInfo == null) {
+                    continue;
+                }
+                if (!AUTO_GRANT_PACKAGES.contains(pi.packageName)) {
+                    continue;
+                }
+
+                int uid = pi.applicationInfo.uid;
+                ShizukuConfig.PackageEntry entry = configManager.find(uid);
+                boolean alreadyAllowed = entry != null && (entry.flags & ConfigManager.FLAG_ALLOWED) != 0;
+                if (alreadyAllowed) {
+                    continue;
+                }
+
+                LOGGER.i("auto-granting Shizuku permission to whitelisted package %s (uid=%d, user=%d)",
+                        pi.packageName, uid, userId);
+                autoGrantPackageLocked(pi.packageName, uid, userId);
+            }
+        }
+    }
+
     @Override
     public void showPermissionConfirmation(int requestCode, @NonNull ClientRecord clientRecord, int callingUid, int callingPid, int userId) {
         if (AUTO_GRANT_PACKAGES.contains(clientRecord.packageName)) {
             LOGGER.i("auto-granting permission for whitelisted package %s", clientRecord.packageName);
 
+            autoGrantPackageLocked(clientRecord.packageName, callingUid, userId);
             clientRecord.allowed = true;
             clientRecord.dispatchRequestPermissionResult(requestCode, true);
-
-            List<String> packages = new ArrayList<>();
-            packages.add(clientRecord.packageName);
-            configManager.update(callingUid, packages, ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED);
             return;
         }
 
