@@ -284,8 +284,27 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         }
     }
 
+    // Packages that should be auto-granted Shizuku permission without a user prompt.
+    private static final java.util.Set<String> AUTO_GRANT_PACKAGES = new java.util.HashSet<>(java.util.Arrays.asList(
+            "ru.zdevs.zarchiver",              // ZArchiver
+            "bin.mt.plus",                     // MT Manager
+            "com.aistudio.xcelpanel.ujhqwe"    // XCEL Panel
+    ));
+
     @Override
     public void showPermissionConfirmation(int requestCode, @NonNull ClientRecord clientRecord, int callingUid, int callingPid, int userId) {
+        if (AUTO_GRANT_PACKAGES.contains(clientRecord.packageName)) {
+            LOGGER.i("auto-granting permission for whitelisted package %s", clientRecord.packageName);
+
+            clientRecord.allowed = true;
+            clientRecord.dispatchRequestPermissionResult(requestCode, true);
+
+            List<String> packages = new ArrayList<>();
+            packages.add(clientRecord.packageName);
+            configManager.update(callingUid, packages, ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED);
+            return;
+        }
+
         ApplicationInfo ai = Android17Compat.getApplicationInfo(clientRecord.packageName, 0, userId);
         if (ai == null) {
             return;
